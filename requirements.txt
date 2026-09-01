@@ -1,0 +1,4 @@
+customtkinter==5.2.2
+webdavclient3==3.14.7
+pillow==12.3.0
+windnd==1.0.7 ; sys_platform == 'win32'
