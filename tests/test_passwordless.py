@@ -1,13 +1,12 @@
-"""Тесты схемы «без паролей в программе» (v1.4.0).
+"""Тесты схемы «без паролей в программе» (v1.4.0 → v1.5.0).
 
-Пароль облачного аккаунта больше не зашит в код: его вводит сотрудник
-на экране настройки подключения, хранит Windows Credential Manager.
-Здесь проверяются чистые функции core, обслуживающие эту схему:
-распознавание ошибок авторизации и письмо-запрос пароля.
+Пароль облачного аккаунта не зашит в код: его вводит сотрудник на
+единственном экране входа, хранит Windows Credential Manager. Здесь
+проверяются чистые функции core, обслуживающие эту схему:
+распознавание ошибок авторизации и валидация адресов.
 """
 import pathlib
 import smtplib
-from urllib.parse import parse_qs, unquote, urlparse
 
 import core
 
@@ -48,50 +47,15 @@ def test_not_auth_error_unrelated_words():
     assert core.is_auth_error(Exception("Maximum number of files exceeded")) is False
 
 
-# --- письмо-запрос пароля ---------------------------------------------------
+# --- потрошенный mailto-флоу удалён ------------------------------------------
 
 
-def test_mailto_recipient_and_params():
-    """mailto адресован администратору и содержит тему с телом письма."""
-    url = core.build_password_request_mailto("admin@lib.ru", "ivanov@lib.ru")
-    parsed = urlparse(url)
-    assert parsed.scheme == "mailto"
-    assert parsed.path == "admin@lib.ru"
-    qs = parse_qs(parsed.query)
-    assert "КМЦБС" in unquote(qs["subject"][0])
-    assert "пароль" in unquote(qs["body"][0])
-
-
-def test_mailto_contains_sender_email():
-    """В теле письма указана рабочая почта сотрудника — администратору
-    понятно, кому передать пароль лично."""
-    url = core.build_password_request_mailto("admin@lib.ru", "ivanov@lib.ru")
-    assert "ivanov@lib.ru" in unquote(url)
-
-
-def test_mailto_specials_are_quoted():
-    """Кириллица и перевод строки кодируются — почтовая программа
-    откроет ссылку без потерь."""
-    url = core.build_password_request_mailto("a@b.ru", "c@d.ru")
-    assert "%0A" in url or "%0a" in url  # перевод строки закодирован
-    assert " " not in url
-
-
-def test_request_letter_text():
-    """Текст для буфера обмена содержит тему и те же ключевые фразы."""
-    letter = core.password_request_letter("ivanov@lib.ru")
-    assert letter.startswith("Тема:")
-    assert "КМЦБС" in letter
-    assert "пароль" in letter
-    assert "ivanov@lib.ru" in letter
-
-
-def test_mailto_and_letter_consistent():
-    """Оба варианта письма говорят об одном и том же."""
-    url = core.build_password_request_mailto("a@b.ru", "c@d.ru")
-    letter = core.password_request_letter("c@d.ru")
-    assert "КМЦБС Новости" in unquote(url)
-    assert "КМЦБС Новости" in letter
+def test_password_request_helpers_removed():
+    """Запрос пароля по почте (mailto/буфер обмена) удалён в v1.5.0:
+    на машинах без почтовой программы он не работал и плодил окна.
+    Пароль сотрудник запрашивает у администратора напрямую."""
+    assert not hasattr(core, "build_password_request_mailto")
+    assert not hasattr(core, "password_request_letter")
 
 
 # --- DEFAULTS без паролей ----------------------------------------------------

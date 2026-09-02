@@ -10,7 +10,7 @@ import webbrowser
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from logging.handlers import RotatingFileHandler
-from tkinter import filedialog, messagebox
+from tkinter import filedialog
 
 import customtkinter as ctk
 from webdav3.client import Client
@@ -104,269 +104,147 @@ class CustomYesNoBox(ctk.CTkToplevel):
         return self.result
 
 class LoginWindow(ctk.CTkToplevel):
+    """Вход: почта получателя + пароль облачного аккаунта (v1.5.0).
+
+    Кода подтверждения больше нет: пароль — единственный барьер (секретов
+    в программе нет, пароль выдаёт владелец лично). Ошибки показываются
+    строкой под полем — без модальных окон и вспомогательных экранов.
+    """
+
     def __init__(self, parent, on_success):
         super().__init__(parent)
         self.parent = parent
         self.on_success = on_success
         self.title("Вход — КМЦБС Новости")
-        self.geometry("460x480")
+        self.geometry("440x430")
         self.resizable(False, False)
         self.attributes("-topmost", True)
 
+        # Защита от перебора: после 5 неудач — минутная пауза
+        # (повторные неверные логины могут надолго заблокировать
+        # общий аккаунт на стороне mail.ru)
+        self._attempts = 0
+        self._lock_until = 0.0
+
         # Центрирование
         self.update_idletasks()
-        x = (self.winfo_screenwidth() // 2) - (460 // 2)
-        y = (self.winfo_screenheight() // 2) - (480 // 2)
+        w, h = 440, 430
+        x = (self.winfo_screenwidth() // 2) - (w // 2)
+        y = (self.winfo_screenheight() // 2) - (h // 2)
         self.geometry(f"+{x}+{y}")
-
-        self.verification_code = None
-        self.target_email = None
-
-        # Защита от подбора кода подтверждения: счётчик попыток и срок действия
-        self._code_attempts = 0
-        self._code_expires_at = 0.0
 
         # B4: закрытие окна входа крестиком должно завершать приложение,
         # иначе оно навсегда зависало в памяти скрытым
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
-        # Вход — сразу подтверждение рабочей почты (общий PIN-код удалён:
-        # он зашит в exe и не останавливал постороннего, а идентификация
-        # и так делается подтверждением email)
-        if self.parent.settings.get("verified_email") and not (self.parent.settings.get("smtp_password") or "").strip():
-            # почта подтверждена, но пароль облака на этой машине потерян
-            # (например, очистили Credential Manager) — сразу к настройке
-            self.target_email = self.parent.settings["verified_email"]
-            self.show_password_setup_screen()
-        else:
-            self.show_email_input_screen()
+        ctk.CTkLabel(self, text="Добро пожаловать!", font=("Segoe UI", 22, "bold")).pack(pady=(28, 4))
+        ctk.CTkLabel(self, text="Программа для отправки новостей КМЦБС",
+                     font=("Segoe UI", 12), text_color=theme.current()["text_secondary"]).pack()
+
+        ctk.CTkLabel(self, text="Почта получателя новостей:", font=("Segoe UI", 12, "bold")).pack(pady=(14, 2))
+        self.entry_admin = ctk.CTkEntry(self, width=310, height=40, font=("Segoe UI", 14))
+        self.entry_admin.pack()
+        self.entry_admin.insert(0, self.parent.settings.get("admin_email") or "")
+
+        ctk.CTkLabel(self, text="Пароль:", font=("Segoe UI", 12, "bold")).pack(pady=(12, 2))
+        self.entry_pw = ctk.CTkEntry(self, width=310, height=40, show="*", font=("Segoe UI", 14))
+        self.entry_pw.pack()
+        self.entry_pw.focus_set()
+        self.entry_pw.bind("<Return>", lambda _e: self.try_login())
+
+        self._show_pw = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(self, text="Показать пароль", variable=self._show_pw, font=("Segoe UI", 11),
+                        checkbox_width=18, checkbox_height=18, command=self._toggle_pw).pack(pady=(8, 0))
+
+        self.btn_login = ctk.CTkButton(self, text="Войти", width=200, height=42, command=self.try_login,
+                                       fg_color=theme.current()["success"], hover_color=theme.current()["success_hover"])
+        self.btn_login.pack(pady=(16, 2))
+
+        # Инлайн-ошибка вместо модальных окон
+        self.error_label = ctk.CTkLabel(self, text="", font=("Segoe UI", 12),
+                                        text_color=theme.current()["error"], wraplength=330, justify="center")
+        self.error_label.pack(pady=(4, 0))
+
+        ctk.CTkLabel(self, text="Не знаете пароль? Напишите: "
+                                f"{self.parent.settings.get('admin_email') or 'администратору'}",
+                     font=("Segoe UI", 11), text_color=theme.current()["text_secondary"]).pack(side="bottom", pady=16)
 
     def on_close(self):
         self.parent.destroy()
 
-    def show_email_input_screen(self):
-        self.clear_window()
-        ctk.CTkLabel(self, text="Подтверждение почты", font=("Segoe UI", 22, "bold")).pack(pady=(30, 10))
-        ctk.CTkLabel(self, text="Введите ваш рабочий Email\n(на него придет код):", font=("Segoe UI", 13)).pack(pady=5)
+    def _toggle_pw(self):
+        self.entry_pw.configure(show="" if self._show_pw.get() else "*")
 
-        self.entry_email = ctk.CTkEntry(self, width=300, height=40, placeholder_text="example@mail.ru", font=("Segoe UI", 15))
-        self.entry_email.pack(pady=10)
-        if self.target_email:
-            self.entry_email.insert(0, self.target_email)
+    def _show_error(self, text: str):
+        self.error_label.configure(text=text)
 
-        self.btn_send_code = ctk.CTkButton(self, text="Далее", width=200, height=40, command=self.send_code_thread)
-        self.btn_send_code.pack(pady=20)
-
-    def send_code_thread(self):
-        email = self.entry_email.get().strip()
-        if not core.is_valid_email(email):
-            messagebox.showerror("Ошибка", "Введите корректный Email!")
+    def try_login(self):
+        if time.monotonic() < self._lock_until:
+            left = int(self._lock_until - time.monotonic()) + 1
+            self._show_error(f"Слишком много попыток — подождите {left} с.")
             return
-
-        self.target_email = email
-        if (self.parent.settings.get("smtp_password") or "").strip():
-            self._start_send_code()
-        else:
-            # пароль облака на этой машине ещё не вводился:
-            # без него программа не может отправить код — сначала настройка
-            self.show_password_setup_screen()
-
-    def _start_send_code(self):
-        """Запускает отправку кода (кнопка есть только на экране почты)."""
-        if getattr(self, "btn_send_code", None) is not None:
-            self.btn_send_code.configure(state="disabled", text="Отправка...")
-        threading.Thread(target=self.send_code_logic, args=(self.target_email,)).start()
-
-    # --- Настройка подключения (пароль выдаёт администратор лично) ---
-
-    def show_password_setup_screen(self):
-        """Почта получателя + пароль облачного аккаунта.
-
-        Пароль вводит сам сотрудник (получает лично от администратора);
-        в программе паролей нет. Кнопка запроса открывает почту
-        сотрудника с готовым письмом — секретов для этого не нужно.
-        """
-        self.clear_window()
-        ctk.CTkLabel(self, text="Настройка подключения", font=("Segoe UI", 20, "bold")).pack(pady=(18, 6))
-        ctk.CTkLabel(self, text="Пароль выдаёт администратор лично.\nОдин — от облачного аккаунта программы.", font=("Segoe UI", 12)).pack(pady=(0, 8))
-
-        ctk.CTkLabel(self, text="Почта получателя новостей:", font=("Segoe UI", 12, "bold")).pack(pady=(8, 2))
-        self.entry_admin = ctk.CTkEntry(self, width=310, height=38, font=("Segoe UI", 14))
-        self.entry_admin.pack()
-        self.entry_admin.insert(0, self.parent.settings.get("admin_email") or "")
-
-        ctk.CTkLabel(self, text="Пароль облачного аккаунта:", font=("Segoe UI", 12, "bold")).pack(pady=(12, 2))
-        self.entry_pw = ctk.CTkEntry(self, width=310, height=38, show="*", font=("Segoe UI", 14))
-        self.entry_pw.pack()
-        self.entry_pw.focus_set()
-
-        self.btn_setup = ctk.CTkButton(self, text="Продолжить", width=200, height=38, command=self.setup_continue,
-                                       fg_color=theme.current()["success"], hover_color=theme.current()["success_hover"])
-        self.btn_setup.pack(pady=(18, 4))
-        ctk.CTkButton(self, text="Не знаю пароль — запросить", width=200, height=32, command=self.show_password_request_screen,
-                      fg_color="transparent", border_width=1, text_color=theme.current()["text"], hover_color=theme.current()["hover_soft"]).pack(pady=4)
-        ctk.CTkButton(self, text="Назад", width=100, height=28, command=self.show_email_input_screen,
-                      fg_color="transparent", border_width=1, text_color=theme.current()["text"], hover_color=theme.current()["hover_soft"]).pack(pady=6)
-
-    def setup_continue(self):
         admin = self.entry_admin.get().strip()
         password = self.entry_pw.get().strip()
         if not core.is_valid_email(admin):
-            messagebox.showerror("Ошибка", "Укажите корректную почту получателя новостей!")
+            self._show_error("Укажите корректную почту получателя.")
             return
         if not password:
-            messagebox.showerror("Ошибка", "Введите пароль облачного аккаунта.\nЕсли не знаете его — нажмите «Запросить».")
+            self._show_error("Введите пароль.")
             return
 
-        self.parent.settings["admin_email"] = admin
-        # аккаунт программы один: пароль подходит и для облака, и для почты
-        self.parent.settings["smtp_password"] = password
-        self.parent.settings["webdav_password"] = password
-        self.parent.save_settings()
+        self._show_error("")
+        self.btn_login.configure(state="disabled", text="Проверяю...")
+        threading.Thread(target=self._check_credentials, args=(admin, password), daemon=True).start()
 
-        self.btn_setup.configure(state="disabled", text="Отправка...")
-        threading.Thread(target=self.send_code_logic, args=(self.target_email,)).start()
-
-    def show_password_request_screen(self):
-        """Запрос пароля: готовое письмо в почтовой программе сотрудника."""
-        self.clear_window()
-        ctk.CTkLabel(self, text="Запрос пароля", font=("Segoe UI", 20, "bold")).pack(pady=(18, 6))
-        ctk.CTkLabel(self, text="Откроется ваша почта с готовым письмом.\nПароль администратор передаст вам лично.", font=("Segoe UI", 12)).pack(pady=(0, 8))
-
-        ctk.CTkLabel(self, text="Кому отправить запрос:", font=("Segoe UI", 12, "bold")).pack(pady=(8, 2))
-        self.entry_req = ctk.CTkEntry(self, width=310, height=38, font=("Segoe UI", 14))
-        self.entry_req.pack()
-        self.entry_req.insert(0, self.parent.settings.get("admin_email") or "")
-        self.entry_req.focus_set()
-
-        ctk.CTkButton(self, text="Открыть мою почту", width=210, height=38, command=self.open_password_request,
-                      fg_color=theme.current()["success"], hover_color=theme.current()["success_hover"]).pack(pady=(16, 4))
-        ctk.CTkButton(self, text="Скопировать текст письма", width=210, height=32, command=self.copy_password_request,
-                      fg_color="transparent", border_width=1, text_color=theme.current()["text"], hover_color=theme.current()["hover_soft"]).pack(pady=4)
-        ctk.CTkButton(self, text="Назад", width=100, height=28, command=self.show_password_setup_screen,
-                      fg_color="transparent", border_width=1, text_color=theme.current()["text"], hover_color=theme.current()["hover_soft"]).pack(pady=6)
-
-    def open_password_request(self):
-        recipient = self.entry_req.get().strip()
-        if not core.is_valid_email(recipient):
-            messagebox.showerror("Ошибка", "Укажите корректный Email для запроса!")
-            return
-        url = core.build_password_request_mailto(recipient, self.target_email or "")
-        if webbrowser.open(url):
-            messagebox.showinfo("Готово", "Открылась ваша почта с готовым письмом — просто отправьте его.\n\n"
-                                          "Пароль вам передадут лично. После этого вернитесь\nи введите его на экране настройки.")
-        else:
-            # почтовая программа не ассоциирована — запасной путь
-            self.copy_password_request()
-
-    def copy_password_request(self):
-        letter = core.password_request_letter(self.target_email or "")
-        self.clipboard_clear()
-        self.clipboard_append(letter)
-        messagebox.showinfo("Скопировано", "Текст письма скопирован в буфер обмена.\n"
-                                          "Вставьте его в любое письмо или сообщение.")
-
-    def send_code_logic(self, email):
+    def _check_credentials(self, admin: str, password: str):
+        """Проверяет пароль реальным SMTP-логином (в фоновом потоке)."""
         try:
-            code = core.generate_verification_code()
+            with smtplib.SMTP_SSL(self.parent.settings["smtp_server"],
+                                  self.parent.settings["smtp_port"],
+                                  timeout=core.SMTP_TIMEOUT_SEC) as server:
+                server.login(self.parent.settings["smtp_user"], password)
 
-            html = f"""
-            <html><body>
-                <h2 style='color: #0d6efd;'>Код подтверждения КМЦБС</h2>
-                <p>Вы регистрируетесь в программе 'КМЦБС Новости'.</p>
-                <p style='font-size: 24px; font-weight: bold; background: #f0f0f0; padding: 10px; display: inline-block;'>{code}</p>
-                <p>Введите этот код в окне программы.</p>
-                <p>Код действителен {core.VERIFICATION_CODE_TTL_SEC // 60} минут.</p>
-            </body></html>
-            """
+            def accepted():
+                # аккаунт программы один: пароль подходит и для почты, и для облака
+                self.parent.settings["admin_email"] = admin
+                self.parent.settings["smtp_password"] = password
+                self.parent.settings["webdav_password"] = password
+                self.parent.save_settings()
+                self.on_success()
+                self.destroy()
 
-            msg = MIMEMultipart()
-            msg['From'] = self.parent.settings["smtp_user"]
-            msg['To'] = email
-            msg['Subject'] = "Код подтверждения КМЦБС"
-            msg.attach(MIMEText(html, 'html'))
-
-            with smtplib.SMTP_SSL(
-                self.parent.settings["smtp_server"],
-                self.parent.settings["smtp_port"],
-                timeout=core.SMTP_TIMEOUT_SEC,
-            ) as server:
-                server.login(self.parent.settings["smtp_user"], self.parent.settings["smtp_password"])
-                server.send_message(msg)
-
-            def accept_code():
-                # код и срок его действия фиксируются в потоке UI
-                self.verification_code = code
-                self._code_expires_at = time.monotonic() + core.VERIFICATION_CODE_TTL_SEC
-                self._code_attempts = 0
-                self.show_verify_code_screen()
-
-            self.after(0, accept_code)
+            self.after(0, accepted)
         except Exception as e:
-            # B1: текст ошибки фиксируется в локальную переменную — lambda не
-            # должна захватывать переменную исключения (она удаляется после
-            # выхода из except-блока, что давало NameError и «тихий» сбой)
-            err = str(e)
-            log.exception("Не удалось отправить код подтверждения")
             auth_failed = core.is_auth_error(e)
+            log.warning("Не удалось войти: %s", e)
 
-            def show_error():
-                if auth_failed:
-                    # пароль не подошёл — вернуть на экран настройки,
-                    # чтобы ввести заново или запросить у администратора
-                    messagebox.showerror("Ошибка", "Пароль не подошёл. Проверьте его\nили запросите у администратора.")
-                    self.show_password_setup_screen()
+            def rejected():
+                self.btn_login.configure(state="normal", text="Войти")
+                if not auth_failed:
+                    self._show_error("Не удалось связаться с почтовым сервером.\n"
+                                     "Проверьте интернет и попробуйте ещё раз.")
+                    return
+                self._attempts += 1
+                self.entry_pw.delete(0, "end")
+                self.entry_pw.focus_set()
+                if self._attempts >= core.LOGIN_MAX_ATTEMPTS:
+                    self._lock_until = time.monotonic() + core.LOGIN_LOCKOUT_SEC
+                    self._attempts = 0
+                    self._show_error("Пароль не подошёл.\nПодождите минуту и попробуйте снова.")
                 else:
-                    messagebox.showerror("Ошибка", f"Не удалось отправить код: {err}")
-                    # экран почты создаст кнопку заново (разблокированной)
-                    self.show_email_input_screen()
+                    self._show_error("Пароль не подошёл. Проверьте его\nили запросите у администратора.")
 
-            self.after(0, show_error)
+            self.after(0, rejected)
 
-    def show_verify_code_screen(self):
-        self.clear_window()
-        ctk.CTkLabel(self, text="Введите код", font=("Segoe UI", 22, "bold")).pack(pady=(30, 10))
-        ctk.CTkLabel(self, text=f"Код отправлен на {self.target_email}", font=("Segoe UI", 12)).pack(pady=5)
-        
-        self.entry_vcode = ctk.CTkEntry(self, width=150, height=45, justify="center", font=("Segoe UI", 20, "bold"))
-        self.entry_vcode.pack(pady=15)
-        self.entry_vcode.focus_set()
-        
-        ctk.CTkButton(self, text="Подтвердить", width=200, height=40, command=self.check_verification_code, fg_color=theme.current()["success"], hover_color=theme.current()["success_hover"]).pack(pady=10)
-        ctk.CTkButton(self, text="Назад", width=100, height=30, command=self.show_email_input_screen, fg_color="transparent", border_width=1, text_color=theme.current()["text"], hover_color=theme.current()["hover_soft"]).pack(pady=5)
-
-    def check_verification_code(self):
-        entered = self.entry_vcode.get().strip()
-        if not self.verification_code or time.monotonic() > self._code_expires_at:
-            messagebox.showerror("Ошибка", "Срок действия кода истёк. Запросите новый код.")
-            self.show_email_input_screen()
-            return
-        if entered == self.verification_code:
-            self.parent.settings["verified_email"] = self.target_email
-            self.parent.save_settings()
-            self.on_success()
-            self.destroy()
-            return
-        self._code_attempts += 1
-        left = core.VERIFICATION_CODE_MAX_ATTEMPTS - self._code_attempts
-        if left <= 0:
-            messagebox.showerror("Ошибка", "Слишком много неверных попыток. Запросите новый код.")
-            self.show_email_input_screen()
-        else:
-            messagebox.showerror("Ошибка", f"Неверный код подтверждения! Осталось попыток: {left}")
-
-    def clear_window(self):
-        for widget in self.winfo_children():
-            widget.destroy()
 
 class NewsApp(ctk.CTk):
     def __init__(self):
         super().__init__()
 
         # Паролей в коде НЕТ: облачный пароль выдаётся администратором лично
-        # и вводится на экране настройки подключения при первом входе
-        # (хранится в Windows Credential Manager). Общий пароль один —
-        # от аккаунта muk_kmcbs_smi@mail.ru (облако и почта).
+        # и вводится один раз на экране входа (хранится в Windows
+        # Credential Manager). Общий пароль один — от аккаунта
+        # muk_kmcbs_smi@mail.ru (облако и почта).
         self.defaults = {
             "webdav_url": "https://webdav.cloud.mail.ru",
             "webdav_login": "muk_kmcbs_smi@mail.ru",
@@ -477,16 +355,15 @@ class NewsApp(ctk.CTk):
             except Exception:
                 log.warning("Не удалось включить Drag&Drop (windnd)", exc_info=True)
 
-        if self.settings.get("verified_email") and (self.settings.get("smtp_password") or "").strip():
-            # почта подтверждена И пароль облака на месте — окно входа
-            # не нужно, сразу в программу (вход и так идентифицируется
-            # подтверждённой почтой, общий PIN-код удалён). Через after():
-            # deiconify/zoomed должны выполняться при работающем mainloop,
-            # иначе окно остаётся скрытым
+        if (self.settings.get("smtp_password") or "").strip():
+            # пароль уже сохранён на этой машине (Credential Manager) —
+            # сразу в программу; почта автора указывается в форме отправки.
+            # Через after(): deiconify/zoomed должны выполняться при
+            # работающем mainloop, иначе окно остаётся скрытым
             self.after(50, self.on_login_success)
         else:
-            # нет подтверждённой почты или пароль потерян — LoginWindow
-            # сам выберет нужный экран: ввод почты или настройку подключения
+            # пароль ещё не вводился — единственный экран входа
+            # (почта получателя + пароль, без кодов подтверждения)
             self.login_win = LoginWindow(self, self.on_login_success)
 
     @property
@@ -571,9 +448,8 @@ class NewsApp(ctk.CTk):
         log.error("Необработанное исключение в колбэке Tk", exc_info=(exc, val, tb))
 
     def on_login_success(self):
-        # Форма «Отправить новость» была отрисована ещё до авторизации,
-        # когда e-mail не был подтверждён — перерисовываем, чтобы поле
-        # «Ваш подтвержденный Email» показывало актуальное значение
+        # Форма «Отправить новость» перерисовывается: поле «Ваш Email»
+        # должно показать почту автора из прошлой сессии
         self.show_send_frame()
         self.deiconify()
         self.state("zoomed")
@@ -724,13 +600,13 @@ class NewsApp(ctk.CTk):
         self._apply_palette()
         ctk.CTkLabel(self.main_container, text="Публикация новостей", font=self.header_font).grid(row=0, column=0, pady=(0, 40))
 
-        # Email теперь только для чтения
-        ctk.CTkLabel(self.main_container, text="Ваш подтвержденный Email", font=self.field_label_font, text_color=self.palette["text_secondary"]).grid(row=1, column=0, sticky="w", pady=(5,0))
-        self.entry_email = ctk.CTkEntry(self.main_container, height=45, font=self.main_font, state="readonly", fg_color=self.palette["input_bg"])
-        self.entry_email.configure(state="normal")
-        self.entry_email.insert(0, str(self.settings.get("verified_email") or "Не подтвержден"))
-        self.entry_email.configure(state="readonly")
+        # Почта автора: указывается при отправке (идентификация в момент
+        # отправки, а не при входе); запоминается для следующих новостей
+        ctk.CTkLabel(self.main_container, text="Ваш Email (автор новости)", font=self.field_label_font, text_color=self.palette["text_secondary"]).grid(row=1, column=0, sticky="w", pady=(5,0))
+        self.entry_email = ctk.CTkEntry(self.main_container, height=45, font=self.main_font, fg_color=self.palette["input_bg"], border_width=1, border_color=self.palette["border"], placeholder_text="vasha@rabota.ru")
+        self.entry_email.insert(0, str(self.settings.get("verified_email") or ""))
         self.entry_email.grid(row=2, column=0, pady=(5, 10), sticky="ew")
+        self.entry_email.bind("<KeyRelease>", lambda _e: self._clear_required_highlight(self.entry_email))
         
         ctk.CTkLabel(self.main_container, text="Филиал или отдел", font=self.field_label_font, text_color=self.palette["text_secondary"]).grid(row=3, column=0, sticky="w", pady=(5,0))
         self.branch_opt = ctk.CTkOptionMenu(self.main_container, values=self.branches, height=45, font=self.main_font, dropdown_font=self.main_font)
@@ -894,9 +770,11 @@ class NewsApp(ctk.CTk):
     def remove_file(self, path):
         if path in self.selected_files: self.selected_files.remove(path); self.update_file_list_display()
 
-    def _missing_required(self, title: str, desc: str) -> list[str]:
+    def _missing_required(self, email: str, title: str, desc: str) -> list[str]:
         """Незаполненные обязательные поля (для подсветки и текста ошибки)."""
         missing = []
+        if not core.is_valid_email(email or ""):
+            missing.append("Ваш Email")
         if not (title or "").strip():
             missing.append("Название новости")
         if not (desc or "").strip() or desc == self.placeholder_text:
@@ -909,11 +787,15 @@ class NewsApp(ctk.CTk):
         Подсветка снимается автоматически, как только в поле начинают
         печатать (см. _clear_required_highlight).
         """
+        email_bad = "Ваш Email" in missing
         title_bad = "Название новости" in missing
         desc_bad = "Описание" in missing
+        self.entry_email.configure(border_color=self.palette["error"] if email_bad else self.palette["border"])
         self.entry_title.configure(border_color=self.palette["error"] if title_bad else self.palette["border"])
         self.text_description.configure(border_color=self.palette["error"] if desc_bad else self.palette["border"])
-        target = self.entry_title if title_bad else (self.text_description if desc_bad else None)
+        target = (self.entry_email if email_bad else
+                  self.entry_title if title_bad else
+                  self.text_description if desc_bad else None)
         if target is not None:
             try:
                 target.focus_set()
@@ -1003,9 +885,9 @@ class NewsApp(ctk.CTk):
     def submit_news(self):
         if self._sending:
             return  # отправка уже идёт
-        email, branch, title = self.settings.get("verified_email"), self.branch_opt.get(), self.entry_title.get().strip()
+        email, branch, title = self.entry_email.get().strip(), self.branch_opt.get(), self.entry_title.get().strip()
         desc = self.text_description.get("0.0", "end-1c").strip()
-        missing = self._missing_required(title, desc)
+        missing = self._missing_required(email, title, desc)
         if missing:
             self._highlight_missing(missing)
             CustomMessagebox(self, "Ошибка",
@@ -1020,7 +902,10 @@ class NewsApp(ctk.CTk):
             if not dialog.get_result():
                 return
 
-        self.settings["last_branch"] = branch; self.save_settings()
+        # почту автора запоминаем — на следующих запусках поле заполнено
+        self.settings["last_branch"] = branch
+        self.settings["verified_email"] = email
+        self.save_settings()
         self._set_sending(True)
         self.progress_bar.grid(row=15, column=0, pady=10); self.progress_bar.set(0)
         self.progress_label.grid(row=16, column=0); self.progress_label.configure(text="Начинаем отправку...")
@@ -1032,7 +917,7 @@ class NewsApp(ctk.CTk):
     def _collect_payload(self):
         """Снимок данных формы (для отправки и предпросмотра)."""
         return {
-            "email": self.settings.get("verified_email"),
+            "email": self.entry_email.get().strip(),
             "branch": self.branch_opt.get(),
             "title": self.entry_title.get().strip(),
             "desc": self.text_description.get("0.0", "end-1c").strip(),
@@ -1050,7 +935,7 @@ class NewsApp(ctk.CTk):
         предпросмотр буквальный, без расхождений.
         """
         payload = self._collect_payload()
-        missing = self._missing_required(payload["title"], payload["desc"])
+        missing = self._missing_required(payload["email"], payload["title"], payload["desc"])
         if missing:
             self._highlight_missing(missing)
             CustomMessagebox(self, "Ошибка",
@@ -1512,12 +1397,12 @@ class NewsApp(ctk.CTk):
         # несколько нажатий подряд плодили стопку диалогов
         self.btn_check_updates = ver_f.winfo_children()[-1]
 
-        # Аккаунт
-        ctk.CTkLabel(self.main_container, text="Ваш профиль:", font=(self.main_font[0], 15, "bold")).grid(row=4, column=0, pady=(30, 5), sticky="w")
+        # Аккаунт: единственный «профиль» — почта автора последней новости
+        # (меняется прямо в форме отправки, отдельная кнопка не нужна)
+        ctk.CTkLabel(self.main_container, text="Аккаунт:", font=(self.main_font[0], 15, "bold")).grid(row=4, column=0, pady=(30, 5), sticky="w")
         acc_f = ctk.CTkFrame(self.main_container, fg_color=self.palette["card"], corner_radius=10, border_width=1, border_color=self.palette["border"])
         acc_f.grid(row=5, column=0, pady=10, sticky="ew")
-        ctk.CTkLabel(acc_f, text=f"Email: {self.settings.get('verified_email') or 'Не подтвержден'}", font=self.main_font).pack(side="left", padx=20, pady=15)
-        ctk.CTkButton(acc_f, text="Сменить аккаунт", width=150, fg_color=self.palette["danger"], hover_color=self.palette["danger_hover"], command=self.logout).pack(side="right", padx=20)
+        ctk.CTkLabel(acc_f, text=f"Почта автора новостей: {self.settings.get('verified_email') or 'не указана — заполните при отправке'}", font=self.main_font).pack(side="left", padx=20, pady=15)
 
         self.admin_mode = ctk.BooleanVar(value=False)
         ctk.CTkCheckBox(self.main_container, text="Режим администратора (Тех. данные)", variable=self.admin_mode, command=self.toggle_admin_settings).grid(row=6, column=0, pady=(30, 10), sticky="w")
@@ -1558,11 +1443,6 @@ class NewsApp(ctk.CTk):
         # статичный хром (окно/панель) перекрашивается в _apply_palette
         self.show_settings_frame()
         self.update_idletasks()
-
-    def logout(self):
-        dialog = CustomYesNoBox(self, "Выход", "Вы действительно хотите сменить аккаунт? Потребуется новое подтверждение Email.")
-        if dialog.get_result():
-            self.settings["verified_email"] = None; self.save_settings(); self.withdraw(); self.login_win = LoginWindow(self, self.on_login_success)
 
     def toggle_admin_settings(self):
         if self.admin_mode.get():
