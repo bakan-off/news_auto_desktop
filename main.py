@@ -455,16 +455,18 @@ class NewsApp(ctk.CTk):
         self.show_send_frame()
         self.deiconify()
         self.state("zoomed")
-        self.check_for_updates(silent=True)
+        # Проверка обновлений НЕ запускается сама (v1.6.2): только по кнопке
+        # в настройках — по требованию заказчика
         if getattr(self, "_config_warning", None):
             warning, self._config_warning = self._config_warning, None
             self.after(300, lambda: CustomMessagebox(self, "Внимание", warning))
 
-    def check_for_updates(self, silent=False):
-        """Сверяет версию с тегами публичного репозитория рассылок (в фоне).
+    def check_for_updates(self):
+        """Сверяет версию с тегами публичного репозитория (в фоне).
 
-        Нет сети / репозиторий недоступен — проверка молча пропускается
-        (или честно сообщает об этом, если запрошена вручную).
+        Запускается ТОЛЬКО кнопкой «Проверить обновления» в настройках
+        (v1.6.2): автопроверки после входа больше нет.
+        Нет сети / репозиторий недоступен — честно сообщает об этом.
         Повторные нажатия, пока идёт проверка, игнорируются: раньше каждый
         клик рождал свой поток и своё окно результата.
         """
@@ -489,7 +491,7 @@ class NewsApp(ctk.CTk):
                         yes_text="Открыть страницу", no_text="Позже")
                     if dialog.get_result():
                         webbrowser.open(f"https://github.com/{core.GITHUB_REPO}/releases")
-                elif not silent:
+                else:
                     if latest:
                         CustomMessagebox(self, "Обновления",
                                          f"У вас последняя версия: {core.APP_VERSION}.")
@@ -1661,7 +1663,7 @@ class NewsApp(ctk.CTk):
 
     def check_for_updates_manual(self):
         """Кнопка «Проверить обновления» в настройках."""
-        self.check_for_updates(silent=False)
+        self.check_for_updates()
 
     def change_theme(self, label: str):
         """Переключение темы из настроек (Тёмная/Светлая/Системная)."""

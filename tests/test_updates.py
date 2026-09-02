@@ -1,5 +1,6 @@
 import json
 import os
+import pathlib
 import shutil
 import sys
 import tempfile
@@ -43,6 +44,23 @@ def test_is_newer_version():
     assert not core.is_newer_version("1.1.0", "1.1.0")
     assert not core.is_newer_version("1.0.9", "1.1.0")
     assert not core.is_newer_version("мусор", "1.0.0")
+
+
+def test_no_automatic_update_check():
+    """Автопроверки обновлений нет (v1.6.2) — только кнопка в настройках.
+
+    Заказчик явно просил: программа не должна лезть в сеть сама. Регрессия
+    на возврат тихого автозапуска после входа (v1.6.1 и раньше).
+    """
+    src = pathlib.Path(__file__).resolve().parent.parent / "main.py"
+    text = src.read_text(encoding="utf-8")
+    # после входа проверка не запускается
+    assert "self.check_for_updates(silent=True)" not in text
+    # у метода нет параметра silent — единственный вызов из кнопки
+    assert "def check_for_updates(self, silent" not in text
+    assert "check_for_updates(silent" not in text
+    # кнопка в настройках остаётся и работает
+    assert "command=self.check_for_updates_manual" in text
 
 
 def test_validate_title_too_long():
