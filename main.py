@@ -1,3 +1,7 @@
+# Аннотации типов ленивые (строками): main.py собирается и под Python 3.8 —
+# 32-битная legacy-сборка для Windows 7 / 32-битной Windows 10 (см. DEVELOPMENT.md)
+from __future__ import annotations
+
 import datetime
 import logging
 import os

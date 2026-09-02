@@ -1,9 +1,14 @@
-﻿# Публикация релиза в основной репозиторий news_auto_desktop (он публичный)
+# Публикация релиза в основной репозиторий news_auto_desktop (он публичный)
 # Использование: pwsh -File publish_dist.ps1 [-Version 1.4.0] [-Notes "текст"]
+#   [-ZipPath <архив>] [-AssetName <имя.zip>]
+# AssetName — имя файла в релизе; по умолчанию KMCBS-News-<версия>.zip.
+# Вторая сборка того же релиза (например, 32-битная для Windows 7)
+# публикуется со своим AssetName и чужие ассеты не трогает.
 param(
     [string]$Version = "1.4.0",
     [string]$Notes = "",
-    [string]$ZipPath = ""
+    [string]$ZipPath = "",
+    [string]$AssetName = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -78,12 +83,16 @@ try {
     } else { throw }
 }
 
-# удалить старые активы, если были (имя ASCII: кириллица в имени актива
-# искажается при загрузке через API)
+# имя ассета: ASCII — кириллица в имени файла искажается при загрузке
+# через API. Удаляем только ассет С ТЕМ ЖЕ именем (устаревшую версию
+# этой же сборки); другие ассеты релиза не трогаем.
+if (-not $AssetName) { $AssetName = "KMCBS-News-$Version.zip" }
+$assetName = $AssetName
 foreach ($a in @($release.assets)) {
-    Invoke-RestMethod -Method Delete -Uri $a.url -Headers $headers | Out-Null
+    if ($a.name -eq $AssetName) {
+        Invoke-RestMethod -Method Delete -Uri $a.url -Headers $headers | Out-Null
+    }
 }
-$assetName = "KMCBS-News-$Version.zip"
 $uploaded = Invoke-RestMethod -Method Post `
     -Uri "https://uploads.github.com/repos/$owner/$repoName/releases/$($release.id)/assets?name=$assetName" `
     -Headers $headers -InFile $ZipPath -ContentType "application/zip"

@@ -1,0 +1,10 @@
+# Зависимости 32-битной legacy-сборки (Windows 7 SP1 / 32-битная Windows 10).
+# Ставятся в отдельный Python 3.8 (32-бит) — см. «Сборка для Windows 7»
+# в DEVELOPMENT.md. Отличия от основного requirements.txt:
+#   pillow==10.4.0 — последняя версия с поддержкой Python 3.8
+#     (основная сборка использует pillow 12.x под Python 3.13).
+# Остальные пакеты тех же версий, что и в основной сборке.
+customtkinter==5.2.2
+webdavclient3==3.14.7
+pillow==10.4.0
+windnd==1.0.7 ; sys_platform == 'win32'
