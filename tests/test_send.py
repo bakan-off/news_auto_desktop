@@ -69,7 +69,12 @@ def test_news_subject_without_branch():
 
 
 def test_report_branch_unspecified():
-    """Письмо честно сообщает «филиал не указан» вместо технической строки."""
+    """Без филиала строки «Автор:» в письме нет вообще (v1.6.1).
+
+    Прежний вариант честно писал «филиал не указан», но живой тест
+    показал: служебная строка в письме не нужна — письмо без филиала
+    просто не содержит строки автора.
+    """
     html_out = core.build_report_html(
         title="Т",
         age_rating="0+",
@@ -82,7 +87,8 @@ def test_report_branch_unspecified():
         active_socials=[],
         author_email="a@b.ru",
     )
-    assert "филиал не указан" in html_out
+    assert "Автор:" not in html_out
+    assert "филиал не указан" not in html_out
     assert "Не указывать" not in html_out
 
 

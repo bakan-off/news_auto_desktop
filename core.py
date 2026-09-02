@@ -26,7 +26,7 @@ log = logging.getLogger("news_core")
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 APP_NAME = "КМЦБС Новости"
-APP_VERSION = "1.6.0"
+APP_VERSION = "1.6.1"
 # «Филиал или отдел» по умолчанию НЕ выбран: программа не должна молча
 # приписывать новость конкретному филиалу. Сотрудник выбирает его сам
 # (осознанный выбор запоминается до следующей смены)
@@ -629,16 +629,18 @@ def build_report_html(
     items = "".join(f"<li><a href='{url}'>{esc(name)}</a></li>" for url, name in file_links)
     # \r\n и \r нормализуем, иначе <br> задвоится
     desc_html = esc(desc).replace("\r\n", "\n").replace("\r", "\n").replace("\n", "<br>")
-    # «Автор» в письме — это филиал; без филиала честно пишем об этом
+    # «Автор» в письме — это филиал; без филиала строка не выводится
+    # вовсе (v1.6.1): заглушка «филиал не указан» в живом тесте
+    # оказалась лишней служебной строкой в письме
     if branch and branch != BRANCH_NOT_SPECIFIED:
-        author_line = esc(branch)
+        author_html = f"<p><i>Автор: {esc(branch)}</i></p>"
     else:
-        author_line = "филиал не указан"
+        author_html = ""
     return (
         f"<html><body style='font-family: Arial, sans-serif; color: #333;'>"
         f"<h3>{esc(title)} ({esc(age_rating)})</h3>"
         f"<p style='line-height:1.6;'>{desc_html}</p>"
-        f"<p><i>Автор: {author_line}</i></p>"
+        f"{author_html}"
         f"<p style='color: #0d6efd;'>{esc(tags)}</p>"
         f"<div style='border:1px solid #ddd;padding:15px;margin-top:20px;border-radius:8px;background-color:#f9f9f9;'>"
         f"<p>📂 <a href='{folder_link}'>Папка новости в облаке</a></p>"
