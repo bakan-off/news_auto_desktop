@@ -213,7 +213,9 @@ class LoginWindow(ctk.CTkToplevel):
                 self.on_success()
                 self.destroy()
 
-            self.after(0, accepted)
+            # UI — только через очередь главного окна: self.after из
+            # фонового потока может обрушить Tcl (правило B4)
+            self.parent.ui_post(accepted)
         except Exception as e:
             auth_failed = core.is_auth_error(e)
             log.warning("Не удалось войти: %s", e)
@@ -234,7 +236,7 @@ class LoginWindow(ctk.CTkToplevel):
                 else:
                     self._show_error("Пароль не подошёл. Проверьте его\nили запросите у администратора.")
 
-            self.after(0, rejected)
+            self.parent.ui_post(rejected)
 
 
 class NewsApp(ctk.CTk):
@@ -537,7 +539,7 @@ class NewsApp(ctk.CTk):
             "appearance_mode": "dark",
             "hashtags": ["#КМЦБС", "#вбиблиотеке"],
             "verified_email": None,
-            "last_branch": self.branches[0],
+            "last_branch": core.BRANCH_NOT_SPECIFIED,
             "drafts": [],
             "history": []
         }
@@ -600,17 +602,38 @@ class NewsApp(ctk.CTk):
         self._apply_palette()
         ctk.CTkLabel(self.main_container, text="Публикация новостей", font=self.header_font).grid(row=0, column=0, pady=(0, 40))
 
-        # Почта автора: указывается при отправке (идентификация в момент
-        # отправки, а не при входе); запоминается для следующих новостей
-        ctk.CTkLabel(self.main_container, text="Ваш Email (автор новости)", font=self.field_label_font, text_color=self.palette["text_secondary"]).grid(row=1, column=0, sticky="w", pady=(5,0))
-        self.entry_email = ctk.CTkEntry(self.main_container, height=45, font=self.main_font, fg_color=self.palette["input_bg"], border_width=1, border_color=self.palette["border"], placeholder_text="vasha@rabota.ru")
+        # Почта автора: подтверждается прямо в форме (код на почту,
+        # один раз до её смены) — администратор отвечает на настоящий
+        # адрес. Статус и ввод кода — строкой под полем, без модалок
+        email_frame = ctk.CTkFrame(self.main_container, fg_color="transparent")
+        email_frame.grid(row=1, column=0, sticky="ew", pady=(5, 10))
+        email_frame.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(email_frame, text="Ваш Email (автор новости)", font=self.field_label_font, text_color=self.palette["text_secondary"]).grid(row=0, column=0, sticky="w")
+        self.entry_email = ctk.CTkEntry(email_frame, height=45, font=self.main_font, fg_color=self.palette["input_bg"], border_width=1, border_color=self.palette["border"], placeholder_text="vasha@rabota.ru")
         self.entry_email.insert(0, str(self.settings.get("verified_email") or ""))
-        self.entry_email.grid(row=2, column=0, pady=(5, 10), sticky="ew")
-        self.entry_email.bind("<KeyRelease>", lambda _e: self._clear_required_highlight(self.entry_email))
+        self.entry_email.grid(row=1, column=0, pady=(5, 0), sticky="ew")
+        self.entry_email.bind("<KeyRelease>", lambda _e: self._on_email_changed())
+        self.email_status_frame = ctk.CTkFrame(email_frame, fg_color="transparent")
+        self.email_status_frame.grid(row=2, column=0, sticky="ew", pady=(6, 0))
+        # состояние подтверждения почты (см. _render_email_status)
+        self._vcode = None
+        self._vcode_email = None
+        self._vcode_expires = 0.0
+        self._vcode_attempts = 0
+        self._vcode_sent_at = 0.0
+        self._email_msg = None
+        self._email_sending = False
+        self._email_ui_state = None
+        self._render_email_status()
         
         ctk.CTkLabel(self.main_container, text="Филиал или отдел", font=self.field_label_font, text_color=self.palette["text_secondary"]).grid(row=3, column=0, sticky="w", pady=(5,0))
-        self.branch_opt = ctk.CTkOptionMenu(self.main_container, values=self.branches, height=45, font=self.main_font, dropdown_font=self.main_font)
-        self.branch_opt.set(self.settings.get("last_branch", self.branches[0]))
+        # «Не указывать» первой строкой: филиал НЕ подставляется сам —
+        # тихий дефолт приписывал новости чужой филиал. Помнится только
+        # осознанный выбор сотрудника (last_branch)
+        self.branch_values = [core.BRANCH_NOT_SPECIFIED, *self.branches]
+        self.branch_opt = ctk.CTkOptionMenu(self.main_container, values=self.branch_values, height=45, font=self.main_font, dropdown_font=self.main_font)
+        last = self.settings.get("last_branch")
+        self.branch_opt.set(last if last in self.branch_values else core.BRANCH_NOT_SPECIFIED)
         self.branch_opt.grid(row=4, column=0, pady=(5, 15), sticky="ew")
 
         self.entry_title = self.create_styled_entry("Название новости", 5)
@@ -705,6 +728,196 @@ class NewsApp(ctk.CTk):
         text = f"{n}/{core.MAX_DESC_LEN}"
         over = n > core.MAX_DESC_LEN
         self.desc_counter.configure(text=text, text_color=self.palette["error"] if over else self.palette["text_secondary"])
+
+    # --- Подтверждение почты автора (в форме, один раз до смены почты) -------
+
+    def _email_confirmed(self, email: str) -> bool:
+        return core.is_same_email(self.settings.get("verified_email"), email)
+
+    def _email_state(self) -> str:
+        """Текущее состояние строки подтверждения: empty / verified /
+        unverified / sending / code."""
+        email = self.entry_email.get().strip()
+        if self._email_sending:
+            return "sending"
+        if not email:
+            return "empty"
+        if self._vcode and core.is_same_email(self._vcode_email, email):
+            return "code"
+        if self._email_confirmed(email):
+            return "verified"
+        return "unverified"
+
+    def _on_email_changed(self):
+        self._clear_required_highlight(self.entry_email)
+        # почта изменилась — ожидающий код относится уже не к ней
+        email = self.entry_email.get().strip()
+        if self._vcode and not core.is_same_email(self._vcode_email, email):
+            self._vcode = None
+            self._email_msg = None
+        if self._email_state() != self._email_ui_state:
+            self._render_email_status()
+
+    def _render_email_status(self):
+        """Перерисовывает строку статуса под полем «Ваш Email».
+
+        Подтверждённая почта — зелёная отметка; новая — кнопка «Подтвердить
+        почту»; после отправки кода — поле ввода и проверка, всё здесь же.
+        Ошибки — красной строкой в этой же строке, без модальных окон.
+        """
+        f = self.email_status_frame
+        for w in f.winfo_children():
+            w.destroy()
+        if getattr(self, "_resend_after_id", None):
+            try:
+                self.after_cancel(self._resend_after_id)
+            except Exception:
+                pass
+            self._resend_after_id = None
+        state = self._email_state()
+        self._email_ui_state = state
+
+        if state == "empty":
+            if not self.settings.get("verified_email"):
+                ctk.CTkLabel(f, text="На эту почту администратор отправит ответ по новости",
+                             font=("Segoe UI", 11), text_color=self.palette["text_secondary"]).pack(anchor="w")
+            return
+        if state == "verified":
+            ctk.CTkLabel(f, text="✓ Почта подтверждена — на неё придёт ответ администратора",
+                         font=("Segoe UI", 12), text_color=self.palette["success"]).pack(anchor="w")
+            return
+        if state == "sending":
+            ctk.CTkButton(f, text="Отправляю код...", height=30, width=170, state="disabled").pack(anchor="w")
+            return
+        if state == "unverified":
+            row = ctk.CTkFrame(f, fg_color="transparent")
+            row.pack(anchor="w", fill="x")
+            ctk.CTkButton(row, text="Подтвердить почту", width=170, height=30, font=("Segoe UI", 12),
+                          command=self.send_author_code).pack(side="left")
+            ctk.CTkLabel(row, text="на почту придёт код из 6 цифр",
+                         font=("Segoe UI", 11), text_color=self.palette["text_secondary"]).pack(side="left", padx=10)
+            if self._email_msg:
+                ctk.CTkLabel(f, text=self._email_msg, font=("Segoe UI", 11),
+                             text_color=self.palette["error"]).pack(anchor="w", pady=(2, 0))
+            return
+
+        # state == "code": код отправлен, ждём ввод
+        ctk.CTkLabel(f, text=f"Код отправлен на {self._vcode_email} (действует "
+                             f"{core.VERIFICATION_CODE_TTL_SEC // 60} мин)",
+                     font=("Segoe UI", 11), text_color=self.palette["text_secondary"]).pack(anchor="w")
+        row = ctk.CTkFrame(f, fg_color="transparent")
+        row.pack(anchor="w", fill="x")
+        self.entry_vcode = ctk.CTkEntry(row, width=130, height=34, justify="center",
+                                        font=("Segoe UI", 15, "bold"), fg_color=self.palette["input_bg"],
+                                        border_width=1, border_color=self.palette["border"])
+        self.entry_vcode.pack(side="left", pady=(4, 0))
+        self.entry_vcode.focus_set()
+        self.entry_vcode.bind("<Return>", lambda _e: self._check_author_code())
+        ctk.CTkButton(row, text="Проверить код", height=34, font=("Segoe UI", 12),
+                      command=self._check_author_code).pack(side="left", padx=8, pady=(4, 0))
+        if self._email_msg:
+            ctk.CTkLabel(f, text=self._email_msg, font=("Segoe UI", 11),
+                         text_color=self.palette["error"]).pack(anchor="w")
+        self.btn_vresend = ctk.CTkButton(f, text="Отправить код ещё раз", height=26, width=220,
+                                         font=("Segoe UI", 11), fg_color="transparent", border_width=1,
+                                         border_color=self.palette["border"],
+                                         text_color=self.palette["text_secondary"],
+                                         hover_color=self.palette["hover_soft"],
+                                         command=self.send_author_code)
+        self.btn_vresend.pack(anchor="w", pady=(4, 0))
+        left = int(self._vcode_sent_at + core.VERIFICATION_CODE_RESEND_SEC - time.monotonic())
+        if left > 0:
+            self.btn_vresend.configure(state="disabled", text=f"Отправить код ещё раз (через {left} с)")
+            self._resend_after_id = self.after(1000, self._tick_resend)
+
+    def send_author_code(self):
+        """Отправляет код подтверждения на почту автора (в фоне)."""
+        email = self.entry_email.get().strip()
+        if not core.is_valid_email(email):
+            self.entry_email.configure(border_color=self.palette["error"])
+            self._email_msg = "Укажите корректную почту."
+            self._render_email_status()
+            self.entry_email.focus_set()
+            return
+        self._email_sending = True
+        self._email_msg = None
+        self._render_email_status()
+        smtp = self.settings
+
+        def worker():
+            try:
+                code = core.generate_verification_code()
+                msg = MIMEMultipart()
+                msg['From'] = smtp["smtp_user"]
+                msg['To'] = email
+                msg['Subject'] = core.VERIFICATION_EMAIL_SUBJECT
+                msg.attach(MIMEText(core.build_verification_email_html(code), 'html'))
+                with smtplib.SMTP_SSL(smtp["smtp_server"], int(smtp["smtp_port"]),
+                                      timeout=core.SMTP_TIMEOUT_SEC) as server:
+                    server.login(smtp["smtp_user"], smtp["smtp_password"])
+                    server.send_message(msg)
+                self.ui_post(lambda: self._author_code_sent(email, code))
+            except Exception as e:
+                log.exception("Не удалось отправить код подтверждения почты")
+                auth_failed = core.is_auth_error(e)
+                self.ui_post(lambda: self._author_code_failed(auth_failed))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _author_code_sent(self, email, code):
+        self._vcode = code
+        self._vcode_email = email
+        self._vcode_expires = time.monotonic() + core.VERIFICATION_CODE_TTL_SEC
+        self._vcode_attempts = 0
+        self._vcode_sent_at = time.monotonic()
+        self._email_sending = False
+        self._email_msg = None
+        self._render_email_status()
+
+    def _author_code_failed(self, auth_failed):
+        self._email_sending = False
+        self._vcode = None
+        if auth_failed:
+            self._email_msg = ("Пароль программы не подошёл. Обновите его: "
+                               "Настройки → режим администратора.")
+        else:
+            self._email_msg = "Не удалось отправить код — проверьте интернет и попробуйте ещё раз."
+        self._render_email_status()
+
+    def _tick_resend(self):
+        """Обновляет кнопку повторной отправки кода (обратный отсчёт)."""
+        if not getattr(self, "btn_vresend", None) or not self.btn_vresend.winfo_exists():
+            return
+        left = int(self._vcode_sent_at + core.VERIFICATION_CODE_RESEND_SEC - time.monotonic())
+        if left > 0:
+            self.btn_vresend.configure(text=f"Отправить код ещё раз (через {left} с)")
+            self._resend_after_id = self.after(1000, self._tick_resend)
+        else:
+            self.btn_vresend.configure(state="normal", text="Отправить код ещё раз")
+
+    def _check_author_code(self):
+        entered = (self.entry_vcode.get() or "").strip()
+        if not self._vcode or time.monotonic() > self._vcode_expires:
+            self._vcode = None
+            self._email_msg = "Код истёк — запросите новый."
+            self._render_email_status()
+            return
+        if entered == self._vcode:
+            # почта подтверждена: запоминаем до смены почты
+            self.settings["verified_email"] = self._vcode_email
+            self.save_settings()
+            self._vcode = None
+            self._email_msg = None
+            self._render_email_status()
+            return
+        self._vcode_attempts += 1
+        left = core.VERIFICATION_CODE_MAX_ATTEMPTS - self._vcode_attempts
+        if left <= 0:
+            self._vcode = None
+            self._email_msg = "Слишком много неверных попыток — запросите новый код."
+        else:
+            self._email_msg = f"Неверный код. Осталось попыток: {left}"
+        self._render_email_status()
 
     def create_styled_entry(self, placeholder, row):
         e = ctk.CTkEntry(self.main_container, placeholder_text=placeholder, height=50, font=self.main_font, border_width=1)
@@ -893,6 +1106,23 @@ class NewsApp(ctk.CTk):
             CustomMessagebox(self, "Ошибка",
                              "Заполните обязательные поля:\n• " + "\n• ".join(missing), is_error=True)
             return
+        # Почта автора должна быть подтверждена кодом: администратор
+        # отвечает именно на неё — «левые» адреса не пропускаем
+        if not self._email_confirmed(email):
+            self.entry_email.configure(border_color=self.palette["error"])
+            if self._vcode:
+                self._email_msg = "Введите код из письма — он уже отправлен на вашу почту."
+            else:
+                self._email_msg = "Подтвердите почту — код придёт на неё за минуту."
+            self._render_email_status()
+            target = (self.entry_vcode
+                      if getattr(self, "entry_vcode", None) and self.entry_vcode.winfo_exists()
+                      else self.entry_email)
+            try:
+                target.focus_set()
+            except Exception:
+                pass
+            return
         error = core.validate_submission(email, title, desc, self.placeholder_text, files=self.selected_files)
         if error:
             CustomMessagebox(self, "Ошибка", error, is_error=True); return
@@ -902,9 +1132,8 @@ class NewsApp(ctk.CTk):
             if not dialog.get_result():
                 return
 
-        # почту автора запоминаем — на следующих запусках поле заполнено
         self.settings["last_branch"] = branch
-        self.settings["verified_email"] = email
+        # verified_email не трогаем: он меняется только проверкой кода
         self.save_settings()
         self._set_sending(True)
         self.progress_bar.grid(row=15, column=0, pady=10); self.progress_bar.set(0)
@@ -1042,7 +1271,10 @@ class NewsApp(ctk.CTk):
             msg = MIMEMultipart()
             msg['From'] = self.settings["smtp_user"]
             msg['To'] = self.settings["admin_email"]
-            msg['Subject'] = f"Новость: {core.header_safe(payload['title'])} ({core.header_safe(payload['branch'])})"
+            # Ответ администратора уходит напрямую автору новости
+            # (адрес подтверждён кодом — см. _check_author_code)
+            msg['Reply-To'] = payload['email']
+            msg['Subject'] = core.news_subject(payload['title'], payload['branch'])
             msg.attach(MIMEText(html_body, 'html'))
 
             def send_mail():
@@ -1125,7 +1357,7 @@ class NewsApp(ctk.CTk):
         draft = {
             "date": datetime.datetime.now().strftime("%d.%m.%Y %H:%M"),
             "title": payload.get("title") or "Без названия",
-            "branch": payload.get("branch", self.branches[0]),
+            "branch": payload.get("branch", core.BRANCH_NOT_SPECIFIED),
             "age_rating": payload.get("age_rating", "0+"),
             "desc": payload.get("desc", ""),
             "tags_manual": payload.get("tags", ""),
@@ -1212,8 +1444,10 @@ class NewsApp(ctk.CTk):
 
     def _fill_form_from_item(self, item, warn_missing_files=True):
         """Заполняет форму отправки из черновика/записи истории («Повторить»)."""
-        branch = item.get("branch", self.branches[0])
-        self.branch_opt.set(branch)
+        branch = item.get("branch")
+        # старые черновики/записи без филиала и снятые с списка значения
+        # не должны попадать в выпадающий список мимо «Не указывать»
+        self.branch_opt.set(branch if branch in self.branch_values else core.BRANCH_NOT_SPECIFIED)
         self.entry_title.delete(0, 'end')
         self.entry_title.insert(0, item.get("title", ""))
 
@@ -1402,7 +1636,7 @@ class NewsApp(ctk.CTk):
         ctk.CTkLabel(self.main_container, text="Аккаунт:", font=(self.main_font[0], 15, "bold")).grid(row=4, column=0, pady=(30, 5), sticky="w")
         acc_f = ctk.CTkFrame(self.main_container, fg_color=self.palette["card"], corner_radius=10, border_width=1, border_color=self.palette["border"])
         acc_f.grid(row=5, column=0, pady=10, sticky="ew")
-        ctk.CTkLabel(acc_f, text=f"Почта автора новостей: {self.settings.get('verified_email') or 'не указана — заполните при отправке'}", font=self.main_font).pack(side="left", padx=20, pady=15)
+        ctk.CTkLabel(acc_f, text=f"Почта автора новостей: {self.settings.get('verified_email') or 'не подтверждена — укажите и подтвердите её в форме отправки'}", font=self.main_font).pack(side="left", padx=20, pady=15)
 
         self.admin_mode = ctk.BooleanVar(value=False)
         ctk.CTkCheckBox(self.main_container, text="Режим администратора (Тех. данные)", variable=self.admin_mode, command=self.toggle_admin_settings).grid(row=6, column=0, pady=(30, 10), sticky="w")

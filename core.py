@@ -26,7 +26,11 @@ log = logging.getLogger("news_core")
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 APP_NAME = "КМЦБС Новости"
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.6.0"
+# «Филиал или отдел» по умолчанию НЕ выбран: программа не должна молча
+# приписывать новость конкретному филиалу. Сотрудник выбирает его сам
+# (осознанный выбор запоминается до следующей смены)
+BRANCH_NOT_SPECIFIED = "Не указывать"
 # Основной (публичный) репозиторий: исходники + релизы. Проверка
 # обновлений читает веб-ленту тегов этого репозитория; отдельный
 # репозиторий рассылок больше не используется.
@@ -41,6 +45,13 @@ LOGIN_MAX_ATTEMPTS = 5                 # неверных попыток вхо�
 LOGIN_LOCKOUT_SEC = 60                 # длительность паузы, секунд
 SMTP_TIMEOUT_SEC = 30                  # таймаут сетевых операций SMTP
 HISTORY_LIMIT = 100                    # максимум записей в истории отправок
+
+# Подтверждение почты АВТОРА новости (v1.6.0): в форме отправки, один раз
+# до смены почты. Администратор отвечает автору напрямую — адрес должен
+# быть настоящим.
+VERIFICATION_CODE_TTL_SEC = 600        # срок действия кода подтверждения
+VERIFICATION_CODE_MAX_ATTEMPTS = 5     # попыток ввода кода
+VERIFICATION_CODE_RESEND_SEC = 60      # пауза между отправками кода
 
 # --- Лимиты новости ---------------------------------------------------------
 
@@ -90,6 +101,12 @@ def total_files_size_mb(paths: list[str]) -> float:
 def is_valid_email(value: str) -> bool:
     """Простая проверка адреса e-mail (используется при подтверждении почты)."""
     return bool(EMAIL_RE.match(value.strip()))
+
+
+def is_same_email(a: str | None, b: str | None) -> bool:
+    """Одна ли это почта (без учёта регистра и пробелов по краям)."""
+    a, b = (a or "").strip().lower(), (b or "").strip().lower()
+    return bool(a) and a == b
 
 
 def is_auth_error(exc: Exception) -> bool:
@@ -463,6 +480,43 @@ def migrate_secrets_to_cred_manager(settings: dict) -> bool:
     return moved
 
 
+# --- Подтверждение почты автора ----------------------------------------------
+
+
+def generate_verification_code() -> str:
+    """6-значный код подтверждения из криптографического генератора.
+
+    Используется secrets вместо random: random предсказуем и не подходит
+    для проверочных кодов.
+    """
+    return f"{secrets.randbelow(1_000_000):06d}"
+
+
+VERIFICATION_EMAIL_SUBJECT = "Код подтверждения — КМЦБС Новости"
+
+
+def build_verification_email_html(code: str) -> str:
+    """Письмо с кодом подтверждения почты автора (HTML).
+
+    Код доказывает, что почта настоящая и принадлежит отправителю: именно
+    на неё администратор будет отвечать по вопросам новости.
+    """
+    return f"""
+    <html><body>
+        <h2 style='color: #0d6efd;'>Код подтверждения почты</h2>
+        <p>Вы указали эту почту в программе «КМЦБС Новости» как почту
+        автора новостей.</p>
+        <p style='font-size: 26px; font-weight: bold; background: #f0f0f0;
+                  padding: 10px; display: inline-block; letter-spacing: 4px;'>{code}</p>
+        <p>Введите этот код в программе. Подтверждение нужно один раз —
+        если не смените почту, код больше не понадобится.</p>
+        <p>Код действителен {VERIFICATION_CODE_TTL_SEC // 60} минут.</p>
+        <p style='color: #888;'>Если вы не отправляли новость — просто
+        игнорируйте это письмо.</p>
+    </body></html>
+    """
+
+
 # --- Отправка новости --------------------------------------------------------
 
 
@@ -522,6 +576,18 @@ def header_safe(value: str) -> str:
     return " ".join(str(value).split())
 
 
+def news_subject(title: str, branch: str) -> str:
+    """Тема письма администратору: «Новость: <название> (<филиал>)».
+
+    Без филиала («Не указывать») скобка не добавляется — по пустому
+    значению не должно быть мусора вида «(Не указывать)».
+    """
+    title = header_safe(title)
+    if branch and branch != BRANCH_NOT_SPECIFIED:
+        return f"Новость: {title} ({header_safe(branch)})"
+    return f"Новость: {title}"
+
+
 def build_report_html(
     title: str,
     age_rating: str,
@@ -563,11 +629,16 @@ def build_report_html(
     items = "".join(f"<li><a href='{url}'>{esc(name)}</a></li>" for url, name in file_links)
     # \r\n и \r нормализуем, иначе <br> задвоится
     desc_html = esc(desc).replace("\r\n", "\n").replace("\r", "\n").replace("\n", "<br>")
+    # «Автор» в письме — это филиал; без филиала честно пишем об этом
+    if branch and branch != BRANCH_NOT_SPECIFIED:
+        author_line = esc(branch)
+    else:
+        author_line = "филиал не указан"
     return (
         f"<html><body style='font-family: Arial, sans-serif; color: #333;'>"
         f"<h3>{esc(title)} ({esc(age_rating)})</h3>"
         f"<p style='line-height:1.6;'>{desc_html}</p>"
-        f"<p><i>Автор: {esc(branch)}</i></p>"
+        f"<p><i>Автор: {author_line}</i></p>"
         f"<p style='color: #0d6efd;'>{esc(tags)}</p>"
         f"<div style='border:1px solid #ddd;padding:15px;margin-top:20px;border-radius:8px;background-color:#f9f9f9;'>"
         f"<p>📂 <a href='{folder_link}'>Папка новости в облаке</a></p>"

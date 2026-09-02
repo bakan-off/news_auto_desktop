@@ -53,6 +53,55 @@ def test_header_safe_collapses_newlines():
     assert core.header_safe("Заголовок\nс переносом\tи табом") == "Заголовок с переносом и табом"
 
 
+# --- филиал «Не указывать» (v1.6.0) -------------------------------------------
+
+
+def test_news_subject_with_branch():
+    assert core.news_subject("Заголовок", "Луговская библиотека-филиал №5") == \
+        "Новость: Заголовок (Луговская библиотека-филиал №5)"
+
+
+def test_news_subject_without_branch():
+    """Без филиала — без скобок: «(Не указывать)» в теме было бы мусором."""
+    assert core.news_subject("Заголовок", core.BRANCH_NOT_SPECIFIED) == "Новость: Заголовок"
+    assert core.news_subject("Заголовок", "") == "Новость: Заголовок"
+    assert "Не указывать" not in core.news_subject("Заголовок", core.BRANCH_NOT_SPECIFIED)
+
+
+def test_report_branch_unspecified():
+    """Письмо честно сообщает «филиал не указан» вместо технической строки."""
+    html_out = core.build_report_html(
+        title="Т",
+        age_rating="0+",
+        desc="Д",
+        branch=core.BRANCH_NOT_SPECIFIED,
+        tags="",
+        folder_link="https://cloud.mail.ru/home/f-1",
+        file_links=[],
+        social_links=SOCIALS,
+        active_socials=[],
+        author_email="a@b.ru",
+    )
+    assert "филиал не указан" in html_out
+    assert "Не указывать" not in html_out
+
+
+def test_report_branch_normal():
+    html_out = core.build_report_html(
+        title="Т",
+        age_rating="0+",
+        desc="Д",
+        branch="Луговская библиотека-филиал №5",
+        tags="",
+        folder_link="https://cloud.mail.ru/home/f-1",
+        file_links=[],
+        social_links=SOCIALS,
+        active_socials=[],
+        author_email="a@b.ru",
+    )
+    assert "Автор: Луговская библиотека-филиал №5" in html_out
+
+
 def test_build_report_html_escapes_user_content():
     html_out = core.build_report_html(
         title="<script>alert(1)</script>",
